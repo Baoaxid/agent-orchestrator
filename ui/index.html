@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Orchestrator Cockpit</title>
+  <style>
+    body { font-family: monospace; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+    .panel { border: 1px solid #333; padding: 15px; margin-bottom: 15px; border-radius: 6px; background: #1a1a1a; }
+    .btn { padding: 8px 16px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold; }
+    .btn-green { background: #2e7d32; color: white; margin-right: 8px; }
+    .btn-red { background: #c62828; color: white; }
+    .toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; cursor: pointer; }
+    #logs { height: 320px; overflow-y: auto; background: #0a0a0a; padding: 12px; border: 1px solid #282828; border-radius: 4px; }
+    .log-item { margin-bottom: 10px; border-bottom: 1px solid #222; padding-bottom: 8px; }
+    .agent-tag { font-weight: bold; color: #64b5f6; }
+    .cmd-text { color: #aed581; }
+    .output-pre { margin: 4px 0 0; color: #888; white-space: pre-wrap; font-size: 12px; }
+    .warn-box { border-color: #f57c00; background: #2b1d0c; }
+    .status-badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+    .status-online { background: #1b5e20; color: #a5d6a7; }
+    .status-offline { background: #b71c1c; color: #ffcdd2; }
+  </style>
+</head>
+<body>
+  <h2>Local Agent Pipeline Cockpit <span id="wsStatus" class="status-badge status-offline">DISCONNECTED</span></h2>
+
+  <div class="panel">
+    <label class="toggle">
+      <input type="checkbox" id="safeModeToggle" checked onchange="toggleSafeMode(this.checked)">
+      <span><strong>SAFE MODE</strong> (Require approval for modifying commands)</span>
+    </label>
+    <div style="margin-top: 12px;" id="agentList">Connected Agents: None</div>
+  </div>
+
+  <div id="approvalPanel" class="panel warn-box" style="display: none;">
+    <h3 style="color: #ff9800; margin: 0 0 10px 0;">Manual Review Required</h3>
+    <p>Agent: <span id="targetAgent" class="agent-tag"></span></p>
+    <pre id="targetCommand" style="background: #111; padding: 10px; border: 1px solid #444; border-radius: 4px; font-size: 14px;"></pre>
+    <button class="btn btn-green" onclick="submitDecision(true)">Approve & Run</button>
+    <button class="btn btn-red" onclick="submitDecision(false)">Reject</button>
+  </div>
+
+  <div class="panel">
+    <h3>Terminal Execution Audit</h3>
+    <div id="logs"></div>
+  </div>
+
+  <script>
+    let ws = null;
+    let currentPending = null;
+
+    function connect() {
+      const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${socketProtocol}//${window.location.host}`);
+
+      ws.onopen = () => {
+        const badge = document.getElementById('wsStatus');
+        badge.className = 'status-badge status-online';
+        badge.innerText = 'ONLINE';
+        ws.send(JSON.stringify({ type: 'REGISTER_UI' }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'STATE_SYNC') {
+          document.getElementById('safeModeToggle').checked = data.safeMode;
+          document.getElementById('agentList').innerText = 'Connected Agents: ' + (data.activeAgents.join(', ') || 'None');
+        }
+
+        if (data.type === 'REQUIRE_APPROVAL') {
+          currentPending = data;
+          document.getElementById('targetAgent').innerText = data.agent;
+          document.getElementById('targetCommand').innerText = data.command;
+          document.getElementById('approvalPanel').style.display = 'block';
+        }
+
+        if (data.type === 'LOG_OUTPUT') {
+          const logBox = document.getElementById('logs');
+          const entry = document.createElement('div');
+          entry.className = 'log-item';
+          entry.innerHTML = `<span class="agent-tag">[${data.agent}]</span> <span class="cmd-text">$ ${data.command}</span><pre class="output-pre">${data.output || '(No standard output)'}</pre>`;
+          logBox.appendChild(entry);
+          logBox.scrollTop = logBox.scrollHeight;
+        }
+      };
+
+      ws.onclose = () => {
+        const badge = document.getElementById('wsStatus');
+        badge.className = 'status-badge status-offline';
+        badge.innerText = 'RECONNECTING...';
+        setTimeout(connect, 2000);
+      };
+    }
+
+    connect();
+
+    function toggleSafeMode(val) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'TOGGLE_SAFE_MODE', value: val }));
+      }
+    }
+
+    function submitDecision(approved) {
+      if (!currentPending || !ws) return;
+      ws.send(JSON.stringify({
+        type: 'MANUAL_DECISION',
+        agent: currentPending.agent,
+        command: currentPending.command,
+        approved
+      }));
+      document.getElementById('approvalPanel').style.display = 'none';
+      currentPending = null;
+    }
+  </script>
+</body>
+</html>

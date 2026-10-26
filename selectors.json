@@ -1,0 +1,34 @@
+{
+  "gemini": {
+    "input": ["div[contenteditable=\"true\"]", "rich-textarea p"],
+    "sendBtn": ["button[aria-label*=\"Send\"]", "button[aria-label*=\"Gửi\"]", ".send-button-container button"],
+    "stopBtn": ["button[aria-label*=\"Stop\"]"],
+    "quotaErr": [".error-message", "[aria-live=\"polite\"]"]
+  },
+  "claude": {
+    "input": ["div[contenteditable=\"true\"].ProseMirror", "div[contenteditable=\"true\"]"],
+    "sendBtn": ["button[aria-label=\"Send Message\"]", "button[aria-label*=\"Gửi\"]", "button[data-testid=\"send-button\"]"],
+    "stopBtn": ["button[aria-label=\"Stop Response\"]"],
+    "quotaErr": ["[data-testid=\"message-limit\"]"]
+  },
+  "chatgpt": {
+    "input": ["#prompt-textarea", "div[contenteditable=\"true\"]"],
+    "sendBtn": ["button[data-testid=\"send-button\"]"],
+    "stopBtn": ["button[data-testid=\"stop-button\"]"],
+    "quotaErr": ["[data-testid=\"fruitcake-banner\"]"]
+  },
+  "grok": {
+    "input": [
+      "div.ProseMirror[contenteditable=\"true\"]",
+      "div[contenteditable=\"true\"][role=\"textbox\"]",
+      "textarea"
+    ],
+    "sendBtn": [
+      "button[aria-label*=\"Gửi\"]",
+      "button[aria-label*=\"Send\"]",
+      "button[type=\"submit\"]"
+    ],
+    "stopBtn": ["button[aria-label*=\"Stop\"]", "button[aria-label*=\"Dừng\"]"],
+    "quotaErr": [".limit-reached"]
+  }
+}
