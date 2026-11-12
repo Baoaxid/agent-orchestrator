@@ -34,22 +34,22 @@ function runShell(command) {
 
 const AGENTS = {
   chatgpt: {
-    name: 'ChatGPT',
-    domain: 'chatgpt.com',
-    input: 'div[data-composer-markdown], div.ProseMirror[data-composer-markdown], #prompt-textarea',
-    sendBtn: 'button[data-testid="send-button"], button[aria-label*="Send"], button[aria-label*="Gửi"]'
+    name: "ChatGPT",
+    domain: "chatgpt.com",
+    input: "form div.ProseMirror[contenteditable=\"true\"], form div[contenteditable=\"true\"], #prompt-textarea",
+    sendBtn: "form button[type=\"submit\"], button[data-testid=\"send-button\"], button[aria-label*=\"Send\"], button[aria-label*=\"Gửi\"], button[aria-label*=\"送信\"]"
   },
   gemini: {
-    name: 'Gemini',
-    domain: 'gemini.google.com',
-    input: 'rich-textarea div[contenteditable="true"]',
-    sendBtn: 'button[aria-label*="Send"], button[aria-label*="Gửi"], button.send-button, .send-button-container button'
+    name: "Gemini",
+    domain: "gemini.google.com",
+    input: "rich-textarea div[contenteditable=\"true\"], div[contenteditable=\"true\"]",
+    sendBtn: "button[aria-label*=\"Gửi\"], button[aria-label*=\"Send\"], button.send-button, .send-button-container button"
   },
   claude: {
-    name: 'Claude',
-    domain: 'claude.ai',
-    input: 'fieldset div[contenteditable="true"], div.ProseMirror[contenteditable="true"]',
-    sendBtn: 'button[aria-label*="Send"], button[aria-label*="Gửi"], button[data-testid="send-button"]'
+    name: "Claude",
+    domain: "claude.ai",
+    input: "fieldset div[contenteditable=\"true\"], div.ProseMirror[contenteditable=\"true\"], div[contenteditable=\"true\"]",
+    sendBtn: "button[aria-label*=\"Send\"], button[aria-label*=\"Gửi\"], button[data-testid=\"send-button\"]"
   }
 };
 
@@ -79,66 +79,94 @@ async function getPageHandle(browser, agentKey) {
 }
 
 // Background text submission via CDP protocol
+// Background text submission supporting contenteditable, ProseMirror, and standard inputs
 async function sendTextSilent(page, agentKey, text) {
   if (!page) return false;
   const cfg = AGENTS[agentKey];
 
-  // Focus and clear input container without window-level focus stealing
-  const found = await page.evaluate((selector) => {
+  const injection = await page.evaluate((selector, payload) => {
     const el = document.querySelector(selector);
-    if (!el) return false;
-    el.focus();
-    document.execCommand('selectAll', false, null);
-    document.execCommand('delete', false, null);
-    return true;
-  }, cfg.input);
+    if (!el) return { success: false, reason: "INPUT_NOT_FOUND" };
 
-  if (!found) {
+    el.focus();
+
+    const escapeHtml = (str) =>
+      str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+
+    const htmlPayload = payload
+      .split("\n")
+      .map((line) => `<p>${escapeHtml(line) || "<br>"}</p>`)
+      .join("");
+
+    if (el.isContentEditable) {
+      el.innerHTML = htmlPayload;
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: payload,
+        })
+      );
+    } else if (el.value !== undefined) {
+      el.value = payload;
+    }
+
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+
+    return {
+      success: true,
+      textLen: (el.innerText || el.value || "").trim().length,
+    };
+  }, cfg.input, text);
+
+  if (!injection || !injection.success) {
     console.error(`[ERROR] Input element not found for [${cfg.name}]`);
     return false;
   }
 
-  // Insert text via CDP session
-  try {
-    const client = await page.createCDPSession();
-    await client.send('Input.insertText', { text });
-    await client.detach();
-  } catch (e) {}
+  // Poll send button readiness and click
+  let clicked = false;
+  for (let i = 0; i < 12; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    clicked = await page.evaluate((btnSel) => {
+      const btn = document.querySelector(btnSel);
+      if (btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+        btn.click();
+        return true;
+      }
+      return false;
+    }, cfg.sendBtn);
 
-  await new Promise(r => setTimeout(r, 400));
+    if (clicked) break;
+  }
 
-  // Trigger input events for reactive frontends
-  await page.evaluate((selector) => {
-    const el = document.querySelector(selector);
-    if (el) {
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  }, cfg.input);
-
-  await new Promise(r => setTimeout(r, 500));
-
-  // Trigger submission button or fallback to CDP Enter keypress
-  const clicked = await page.evaluate((btnSel) => {
-    const btn = document.querySelector(btnSel);
-    if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
-      btn.click();
-      return true;
-    }
-    return false;
-  }, cfg.sendBtn);
-
+  // Fallback: Dispatch Enter event if submit button was not clicked
   if (!clicked) {
+    await page.evaluate((selector) => {
+      const el = document.querySelector(selector);
+      if (el) {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+      }
+    }, cfg.input);
+
     try {
       const client = await page.createCDPSession();
-      await client.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-      await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await client.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
       await client.detach();
     } catch (e) {}
   }
 
-  console.log(`[CDP-SILENT] Dispatched text payload (${text.length} chars) to [${cfg.name}].`);
-  await new Promise(r => setTimeout(r, 1000));
+  console.log(`[CDP-SILENT] Dispatched text payload (${text.length} chars) to [${cfg.name}]. Clicked: ${clicked}`);
+  await new Promise((r) => setTimeout(r, 1000));
   return true;
 }
 
@@ -147,26 +175,47 @@ async function getAssistantTurns(page, agentKey) {
   if (!page) return [];
   try {
     return await page.evaluate((key) => {
-      if (key === 'chatgpt') {
-        let nodes = [...document.querySelectorAll('[data-content-search-unit-key*=":assistant"]')];
-        if (!nodes.length) {
-          nodes = [...document.querySelectorAll('[data-message-author-role="assistant"], div.agent-turn')];
+      if (key === "chatgpt") {
+        const assistantUnits = [...document.querySelectorAll('[data-content-search-unit-key*=":assistant"], [data-chatgpt-search-unit-key*=":assistant"], [data-message-author-role="assistant"]')];
+
+        if (assistantUnits.length > 0) {
+          return assistantUnits.map(unit => {
+            const wb = unit.querySelector('[data-testid="chatgpt-writing-block"], [data-oai-writing-block-surface], [data-markdown-copy-text]');
+            let text = wb ? (wb.getAttribute("data-markdown-copy-text") || wb.innerText) : unit.innerText;
+
+            text = text.trim()
+              .replace(/^ChatGPT\s*(đã nói|said|の発言):\s*/i, "")
+              .replace(/^(文章作成|Viết|Document|Code)\s*\n+/i, "")
+              .trim();
+
+            return text;
+          }).filter(Boolean);
         }
-        return nodes.map(n => {
-          let txt = n.innerText.trim();
-          txt = txt.replace(/^ChatGPT (đã nói|said):\s*/i, '').trim();
-          txt = txt.replace(/^(Viết|Document|Code)\s*\n+/i, '').trim();
-          return txt;
-        }).filter(Boolean);
+
+        const standaloneWb = [...document.querySelectorAll('[data-testid="chatgpt-writing-block"], [data-oai-writing-block-surface]')];
+        if (standaloneWb.length > 0) {
+          return standaloneWb.map(wb => (wb.getAttribute("data-markdown-copy-text") || wb.innerText || "").trim()).filter(Boolean);
+        }
+
+        return [];
       }
 
-      if (key === 'gemini') {
-        const bubbles = [...document.querySelectorAll('model-response, [data-test-id="model-response"], .response-container-content')];
+      if (key === "gemini") {
+        let bubbles = [...document.querySelectorAll("model-response")];
+        if (!bubbles.length) {
+          bubbles = [...document.querySelectorAll('[data-test-id="model-response"]')];
+        }
+        if (!bubbles.length) {
+          bubbles = [...document.querySelectorAll(".response-container-content")];
+        }
         return bubbles.map(b => b.innerText.trim()).filter(Boolean);
       }
 
-      if (key === 'claude') {
-        const bubbles = [...document.querySelectorAll('[data-is-streaming], .standard-markdown, div[data-message-author-role="assistant"], .font-claude-message')];
+      if (key === "claude") {
+        let bubbles = [...document.querySelectorAll('div[data-message-author-role="assistant"]')];
+        if (!bubbles.length) {
+          bubbles = [...document.querySelectorAll(".font-claude-message, .standard-markdown")];
+        }
         return bubbles.map(b => b.innerText.trim()).filter(Boolean);
       }
       return [];
@@ -181,68 +230,66 @@ async function isGenerating(page, agentKey) {
   if (!page) return false;
   try {
     return await page.evaluate((key) => {
-      if (key === 'chatgpt') {
+      if (key === "chatgpt") {
         const stop = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="Dừng"]');
         return Boolean(stop && (stop.offsetParent !== null || stop.getClientRects().length > 0));
       }
-      if (key === 'gemini') {
-        const stop = document.querySelector('button[aria-label*="Stop"], button[aria-label*="Dừng"], .stop-button');
+      if (key === "gemini") {
+        const stop = document.querySelector('button[aria-label*="Stop"], button[aria-label*="Dừng"], .stop-button, button[data-test-id="stop-button"], mat-icon[fonticon="stop"]');
         return Boolean(stop && (stop.offsetParent !== null || stop.getClientRects().length > 0));
       }
-      if (key === 'claude') {
+      if (key === "claude") {
         const stop = document.querySelector('button[aria-label*="Stop"], button[aria-label*="Dừng"]');
         const streaming = document.querySelector('[data-is-streaming="true"]');
         return Boolean((stop && (stop.offsetParent !== null || stop.getClientRects().length > 0)) || streaming);
       }
       return false;
     }, agentKey);
-  } catch (err) {
+  } catch (e) {
     return false;
   }
 }
 
 // Wait for complete assistant response turn without focus interruptions
-async function waitForNewTurn(page, agentKey, baseTurnCount, initialText = '') {
+async function waitForNewTurn(page, agentKey, baseTurnCount, initialText = "") {
   const agentName = AGENTS[agentKey].name;
-  console.log(`[PIPELINE] Waiting for silent turn response from [${agentName}] (base turns: ${baseTurnCount})...`);
+  console.log(`[PIPELINE] Waiting for turn response from [${agentName}] (base turns: ${baseTurnCount})...`);
   let stableCount = 0;
   let lastLen = 0;
   let hasStarted = false;
 
   for (let i = 0; i < 90; i++) {
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 1000));
 
     const turns = await getAssistantTurns(page, agentKey);
     const generating = await isGenerating(page, agentKey);
-    const latestText = turns[turns.length - 1] || '';
+    const latestText = turns[turns.length - 1] || "";
     const currentLen = latestText.length;
     const turnsIncreased = turns.length > baseTurnCount;
+    const contentChanged = latestText.length > 0 && latestText !== initialText;
 
-    // Reject short placeholder artifacts (under 80 chars)
     if (!hasStarted) {
-      if (generating || (turnsIncreased && currentLen > 80) || (currentLen > 80 && latestText !== initialText)) {
+      if (generating || turnsIncreased || contentChanged) {
         hasStarted = true;
       }
     }
 
-    if (i % 2 === 0 || generating) {
+    if (i % 3 === 0 || generating || turnsIncreased) {
       console.log(`   [${agentName}] turns: ${turns.length}/${baseTurnCount} | len: ${currentLen} | generating: ${generating} | started: ${hasStarted} | stable: ${stableCount}`);
     }
 
-    if (hasStarted && !generating && currentLen > 80 && currentLen === lastLen) {
+    if (hasStarted && !generating && currentLen > 0 && currentLen === lastLen) {
       stableCount++;
       if (stableCount >= 2) return latestText;
     } else {
       stableCount = 0;
-      lastLen = currentLen;
     }
+    lastLen = currentLen;
   }
-
   console.warn(`[WARN] Timeout reached waiting for [${agentName}].`);
   return null;
 }
 
-// Parse review outcome accurately
 function parseReviewVerdict(text) {
   if (!text) return { approved: false, text: '(No review response received)' };
   const clean = text.replace(/\*\*/g, '').replace(/`/g, '');
